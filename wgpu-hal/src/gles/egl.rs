@@ -662,6 +662,17 @@ impl Instance {
 unsafe impl Send for Instance {}
 unsafe impl Sync for Instance {}
 
+impl Instance {
+	 pub unsafe fn create_surface_from_drm_fd(
+		 &self,
+		 fd: std::os::unix::io::RawFd,
+	 ) -> Result<Surface, crate::InstanceError> {
+			 Err(crate::InstanceError::new(format!(
+				  "TODO"
+			 )))
+	 }
+}
+
 impl crate::Instance<super::Api> for Instance {
     unsafe fn init(desc: &crate::InstanceDescriptor) -> Result<Self, crate::InstanceError> {
         profiling::scope!("Init OpenGL (EGL) Backend");

@@ -530,6 +530,49 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         Ok(id)
     }
 
+    pub unsafe fn instance_create_surface_from_drm_fd(
+        &self,
+        fd: std::os::unix::io::RawFd,
+        id_in: Option<SurfaceId>,
+    ) -> Result<SurfaceId, CreateSurfaceError> {
+        profiling::scope!("Instance::create_surface_drm_fd");
+
+        let mut hal_surface: Option<Result<AnySurface, hal::InstanceError>> = None;
+
+        /* TODO Vulkan support
+        #[cfg(vulkan)]
+        if hal_surface.is_none() {
+            hal_surface = self
+                .instance
+                .vulkan
+                .as_ref()
+                .map(|inst| inst.create_surface_from_drm_fd(fd));
+        }
+        */
+        #[cfg(gles)]
+        if hal_surface.is_none() {
+            hal_surface = Some(Ok(AnySurface::new::<hal::api::Gles>(
+                self.instance
+                    .gl
+                    .as_ref()
+                    .map(|inst| unsafe { inst.create_surface_from_drm_fd(fd) })
+                    .unwrap()
+                    .expect("Failed to create surface from DRM fd"), // TODO better error handling, I'm not good enough at Rust 🙈
+            )));
+        }
+
+        let hal_surface = hal_surface.ok_or(CreateSurfaceError::NoSupportedBackend)??;
+
+        let surface = Surface {
+            presentation: Mutex::new(None),
+            info: ResourceInfo::new("<Surface>", None),
+            raw: hal_surface,
+        };
+
+        let (id, _) = self.surfaces.prepare(id_in).assign(surface);
+        Ok(id)
+    }
+
     /// # Safety
     ///
     /// `layer` must be a valid pointer.
