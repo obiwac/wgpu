@@ -74,6 +74,19 @@ type EglDebugMessageControlFun = unsafe extern "system" fn(
     attrib_list: *const khronos_egl::Attrib,
 ) -> raw::c_int;
 
+type EGLDeviceEXT = *const raw::c_void;
+
+type EglQueryDevicesExtFun = unsafe extern "system" fn(
+    max_devices: u32,
+    devices: *mut EGLDeviceEXT,
+    num_devices: *mut u32,
+) -> raw::c_int;
+
+const EGL_DRM_DEVICE_FILE_EXT: u32 = 0x3233;
+
+type EglQueryDeviceStringExtFun =
+    unsafe extern "system" fn(device: EGLDeviceEXT, name: u32) -> *const raw::c_char;
+
 unsafe extern "system" fn egl_debug_proc(
     error: khronos_egl::Enum,
     command_raw: *const raw::c_char,
@@ -663,14 +676,55 @@ unsafe impl Send for Instance {}
 unsafe impl Sync for Instance {}
 
 impl Instance {
-	 pub unsafe fn create_surface_from_drm_fd(
-		 &self,
-		 fd: std::os::unix::io::RawFd,
-	 ) -> Result<Surface, crate::InstanceError> {
-			 Err(crate::InstanceError::new(format!(
-				  "TODO"
-			 )))
-	 }
+    pub unsafe fn create_surface_from_drm_fd(
+        &self,
+        fd: std::os::unix::io::RawFd,
+    ) -> Result<Surface, crate::InstanceError> {
+        let inner = self.inner.lock();
+        inner.egl.make_current();
+        let egl = &inner.egl.instance;
+
+        // check for EXT_platform_device
+
+        let client_extensions = egl.query_string(None, khronos_egl::EXTENSIONS);
+
+        let client_ext_str = match client_extensions {
+            Ok(ext) => ext.to_string_lossy().into_owned(),
+            Err(_) => String::new(),
+        };
+
+        if !client_ext_str.contains("EGL_EXT_device_enumeration") {
+            return Err(crate::InstanceError::new(format!(
+                "Your EGL implementation does not support EGL_EXT_device_enumeration. In the future, this will fall back on KHR_platform_gbm."
+            )));
+        }
+
+        // get a list of EGLDeviceEXT's
+
+        let egl_query_devices_ext: EglQueryDevicesExtFun = {
+            let addr = egl.get_proc_address("eglQueryDevicesEXT").unwrap();
+            unsafe { std::mem::transmute(addr) }
+        };
+
+        let mut num_devices: u32 = 0;
+        if unsafe { egl_query_devices_ext(0, ptr::null_mut(), &mut num_devices) } == 0 {
+            return Err(crate::InstanceError::new(format!(
+                "Failed to query EGL devices"
+            )));
+        }
+
+        let mut egl_devices: Vec<EGLDeviceEXT> = vec![ptr::null(); num_devices as usize];
+        if unsafe { egl_query_devices_ext(num_devices, egl_devices.as_mut_ptr(), &mut num_devices) }
+            == 0
+        {
+            return Err(crate::InstanceError::new(format!(
+                "Failed to query EGL devices"
+            )));
+        }
+
+        inner.egl.unmake_current();
+        Err(crate::InstanceError::new(format!("TODO")))
+    }
 }
 
 impl crate::Instance<super::Api> for Instance {
