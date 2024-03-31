@@ -1,3 +1,4 @@
+use drm::Device;
 use glow::HasContext;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
@@ -720,6 +721,51 @@ impl Instance {
             return Err(crate::InstanceError::new(format!(
                 "Failed to query EGL devices"
             )));
+        }
+
+        // equivalent to drmGetDevice
+
+        struct DrmDevice {
+            fd: std::os::unix::io::RawFd,
+        }
+
+        impl std::os::unix::io::AsFd for DrmDevice {
+            fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+                unsafe { std::os::fd::BorrowedFd::borrow_raw(self.fd) }
+            }
+        }
+
+        impl Device for DrmDevice {}
+
+        impl DrmDevice {
+            fn new(fd: std::os::unix::io::RawFd) -> Self {
+                Self { fd }
+            }
+        }
+
+        let drm_device = DrmDevice::new(fd);
+
+        // traverse EGLDeviceEXT list to find the one that matches the DRM fd
+
+        let egl_query_device_string_ext: EglQueryDeviceStringExtFun = {
+            let addr = egl.get_proc_address("eglQueryDeviceStringEXT").unwrap();
+            unsafe { std::mem::transmute(addr) }
+        };
+
+        for egl_device in egl_devices.iter() {
+            let egl_raw_name =
+                unsafe { egl_query_device_string_ext(*egl_device, EGL_DRM_DEVICE_FILE_EXT) };
+
+            if egl_raw_name.is_null() {
+                continue;
+            }
+
+            let egl_name = unsafe { std::ffi::CStr::from_ptr(egl_raw_name) };
+            println!(
+                "EGL device: {:?}, DRM device: {:?}",
+                egl_name,
+                drm_device.get_driver().unwrap()
+            );
         }
 
         inner.egl.unmake_current();

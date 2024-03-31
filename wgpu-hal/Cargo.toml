@@ -86,6 +86,7 @@ log = "0.4"
 
 # backend: Gles
 glow = { version = "0.13.1", optional = true }
+drm = "0.11.1"
 
 [dependencies.wgt]
 package = "wgpu-types"

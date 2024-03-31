@@ -533,8 +533,8 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
     pub unsafe fn instance_create_surface_from_drm_fd(
         &self,
         fd: std::os::unix::io::RawFd,
-        id_in: Option<SurfaceId>,
-    ) -> Result<SurfaceId, CreateSurfaceError> {
+        id_in: Input<G, SurfaceId>,
+    ) -> Result<SurfaceId, hal::InstanceError> {
         profiling::scope!("Instance::create_surface_drm_fd");
 
         let mut hal_surface: Option<Result<AnySurface, hal::InstanceError>> = None;
@@ -551,25 +551,27 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         */
         #[cfg(gles)]
         if hal_surface.is_none() {
-            hal_surface = Some(Ok(AnySurface::new::<hal::api::Gles>(
+            hal_surface =
                 self.instance
                     .gl
                     .as_ref()
-                    .map(|inst| unsafe { inst.create_surface_from_drm_fd(fd) })
-                    .unwrap()
-                    .expect("Failed to create surface from DRM fd"), // TODO better error handling, I'm not good enough at Rust 🙈
-            )));
+                    .map(|inst| unsafe {
+							  match inst.create_surface_from_drm_fd(fd) {
+								  Ok(raw) => Ok(AnySurface::new(HalSurface::<hal::api::Gles> { raw: Arc::new(raw) })),
+								  Err(e) => Err(e),
+							  }
+						   })
         }
 
-        let hal_surface = hal_surface.ok_or(CreateSurfaceError::NoSupportedBackend)??;
+        let hal_surface = hal_surface.unwrap()?;
 
         let surface = Surface {
             presentation: Mutex::new(None),
-            info: ResourceInfo::new("<Surface>", None),
+            info: ResourceInfo::new("<Surface>"),
             raw: hal_surface,
         };
 
-        let (id, _) = self.surfaces.prepare(id_in).assign(surface);
+        let (id, _) = self.surfaces.prepare::<G>(id_in).assign(surface);
         Ok(id)
     }
 
