@@ -84,10 +84,18 @@ type EglQueryDevicesExtFun = unsafe extern "system" fn(
     num_devices: *mut u32,
 ) -> raw::c_int;
 
-const EGL_DRM_DEVICE_FILE_EXT: u32 = 0x3233;
+const EGL_DRM_DEVICE_FILE_EXT: khronos_egl::Enum = 0x3233;
 
 type EglQueryDeviceStringExtFun =
-    unsafe extern "system" fn(device: EGLDeviceEXT, name: u32) -> *const raw::c_char;
+    unsafe extern "system" fn(device: EGLDeviceEXT, name: khronos_egl::Enum) -> *const raw::c_char;
+
+const EGL_PLATFORM_DEVICE_EXT: khronos_egl::Enum = 0x313F;
+
+type EglGetPlatformDisplayExtFun = unsafe extern "system" fn(
+    platform: khronos_egl::Enum,
+    native_display: *mut raw::c_void,
+    attrib_list: *const khronos_egl::Attrib,
+) -> khronos_egl::EGLDisplay;
 
 unsafe extern "system" fn egl_debug_proc(
     error: khronos_egl::Enum,
@@ -682,11 +690,11 @@ impl Instance {
         &self,
         fd: std::os::unix::io::RawFd,
     ) -> Result<Surface, crate::InstanceError> {
-        let inner = self.inner.lock();
+        let mut inner = self.inner.lock();
         inner.egl.make_current();
         let egl = &inner.egl.instance;
 
-        // check for EXT_platform_device
+        // check for EGL_EXT_device_enumeration
 
         let client_extensions = egl.query_string(None, khronos_egl::EXTENSIONS);
 
@@ -698,6 +706,14 @@ impl Instance {
         if !client_ext_str.contains("EGL_EXT_device_enumeration") {
             return Err(crate::InstanceError::new(format!(
                 "Your EGL implementation does not support EGL_EXT_device_enumeration. In the future, this will fall back on KHR_platform_gbm."
+            )));
+        }
+
+        // check for EGL_EXT_platform_base
+
+        if !client_ext_str.contains("EGL_EXT_platform_base") {
+            return Err(crate::InstanceError::new(format!(
+                "Your EGL implementation does not support EGL_EXT_platform_base."
             )));
         }
 
@@ -765,7 +781,7 @@ impl Instance {
             }
 
             let egl_name = unsafe { std::ffi::CStr::from_ptr(egl_raw_name) };
-            println!("TODO EGL device: {:?}, DRM device: {:?}", egl_name, driver,);
+            println!("TODO EGL device: {:?}, DRM device: {:?}", egl_name, driver);
 
             // TODO for now, just arbitrarily choose the last device to preserve my sanity
             // what we should be doing however is traversing the list of nodes in the DRM device
@@ -776,7 +792,35 @@ impl Instance {
             chosen_egl_device = *egl_device;
         }
 
-        inner.egl.unmake_current();
+        if chosen_egl_device == EGL_NO_DEVICE_EXT {
+            return Err(crate::InstanceError::new(format!(
+                "Failed to find a matching EGL device (DRM device driver: {:?})",
+                driver
+            )));
+        }
+
+        // create EGL display
+
+        let egl_get_platform_display_ext: EglGetPlatformDisplayExtFun = {
+            let addr = egl.get_proc_address("eglGetPlatformDisplayEXT").unwrap();
+            unsafe { std::mem::transmute(addr) }
+        };
+
+        let display = unsafe {
+            egl_get_platform_display_ext(
+                EGL_PLATFORM_DEVICE_EXT,
+                chosen_egl_device as *mut raw::c_void,
+                ptr::null(),
+            )
+        };
+
+        if display == khronos_egl::NO_DISPLAY {
+            return Err(crate::InstanceError::new(format!(
+                "Failed to create EGL display"
+            )));
+        }
+
+        let khronos_egl_display = unsafe { khronos_egl::Display::from_ptr(display) };
         Err(crate::InstanceError::new(format!("TODO")))
     }
 }
