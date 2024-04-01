@@ -838,11 +838,13 @@ impl Instance {
         // finally, create that surface
 
         inner.egl.unmake_current();
+
         Ok(Surface {
             egl: inner.egl.clone(),
             wsi: self.wsi.clone(),
             config: inner.config,
-            presentable: inner.supports_native_window,
+            // TODO what is the meaning of this???
+            presentable: true, // inner.supports_native_window,
             raw_window_handle: raw_window_handle::DrmWindowHandle::new(
                 fd.try_into().expect("invalid fd"),
             )
