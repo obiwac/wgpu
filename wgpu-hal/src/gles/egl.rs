@@ -821,7 +821,35 @@ impl Instance {
         }
 
         let khronos_egl_display = unsafe { khronos_egl::Display::from_ptr(display) };
-        Err(crate::InstanceError::new(format!("TODO")))
+
+        // create new inner from that EGL display
+
+        let new_inner = Inner::create(
+            self.flags,
+            Arc::clone(&inner.egl.instance),
+            khronos_egl_display,
+            inner.force_gles_minor_version,
+        )?;
+
+        use std::ops::DerefMut;
+        let old_inner = std::mem::replace(inner.deref_mut(), new_inner);
+        drop(old_inner);
+
+        // finally, create that surface
+
+        inner.egl.unmake_current();
+        Ok(Surface {
+            egl: inner.egl.clone(),
+            wsi: self.wsi.clone(),
+            config: inner.config,
+            presentable: inner.supports_native_window,
+            raw_window_handle: raw_window_handle::DrmWindowHandle::new(
+                fd.try_into().expect("invalid fd"),
+            )
+            .into(),
+            swapchain: RwLock::new(None),
+            srgb_kind: inner.srgb_kind,
+        })
     }
 }
 
