@@ -76,6 +76,7 @@ type EglDebugMessageControlFun = unsafe extern "system" fn(
 ) -> raw::c_int;
 
 type EGLDeviceEXT = *const raw::c_void;
+const EGL_NO_DEVICE_EXT: EGLDeviceEXT = 0 as *const raw::c_void;
 
 type EglQueryDevicesExtFun = unsafe extern "system" fn(
     max_devices: u32,
@@ -744,6 +745,7 @@ impl Instance {
         }
 
         let drm_device = DrmDevice::new(fd);
+        let driver = drm_device.get_driver().unwrap();
 
         // traverse EGLDeviceEXT list to find the one that matches the DRM fd
 
@@ -751,6 +753,8 @@ impl Instance {
             let addr = egl.get_proc_address("eglQueryDeviceStringEXT").unwrap();
             unsafe { std::mem::transmute(addr) }
         };
+
+        let mut chosen_egl_device = EGL_NO_DEVICE_EXT;
 
         for egl_device in egl_devices.iter() {
             let egl_raw_name =
@@ -761,11 +765,15 @@ impl Instance {
             }
 
             let egl_name = unsafe { std::ffi::CStr::from_ptr(egl_raw_name) };
-            println!(
-                "EGL device: {:?}, DRM device: {:?}",
-                egl_name,
-                drm_device.get_driver().unwrap()
-            );
+            println!("TODO EGL device: {:?}, DRM device: {:?}", egl_name, driver,);
+
+            // TODO for now, just arbitrarily choose the last device to preserve my sanity
+            // what we should be doing however is traversing the list of nodes in the DRM device
+            // in libdrm, that's just device->nodes[i] (a bit more complicated but that's the gist)
+            // I don't think this is set in drm-rs, so probably I'll have to add it there
+            // I didn't really understand how it's being set in xf86drm.c, so that's why I'm leaving it for later
+
+            chosen_egl_device = *egl_device;
         }
 
         inner.egl.unmake_current();
