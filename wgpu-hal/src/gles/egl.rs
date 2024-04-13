@@ -642,6 +642,7 @@ enum WindowKind {
     Wayland,
     X11,
     AngleX11,
+    DrmFd,
     Unknown,
 }
 
@@ -841,7 +842,10 @@ impl Instance {
 
         Ok(Surface {
             egl: inner.egl.clone(),
-            wsi: self.wsi.clone(),
+            wsi: WindowSystemInterface {
+                display_owner: self.wsi.display_owner.clone(),
+                kind: WindowKind::DrmFd,
+            },
             config: inner.config,
             // TODO what is the meaning of this???
             presentable: true, // inner.supports_native_window,
@@ -1376,6 +1380,7 @@ impl crate::Surface<super::Api> for Surface {
                         };
                         window_ptr
                     }
+                    (WindowKind::DrmFd, Rwh::Drm(handle)) => handle.plane as *mut std::ffi::c_void,
                     _ => {
                         log::warn!(
                             "Initialized platform {:?} doesn't work with window {:?}",
@@ -1421,8 +1426,19 @@ impl crate::Surface<super::Api> for Surface {
                 #[cfg(Emscripten)]
                 let egl1_5: Option<&Arc<EglInstance>> = Some(&self.egl.instance);
 
+                println!(
+                    "exts: {:?}",
+                    self.egl
+                        .instance
+                        .query_string(None, khronos_egl::EXTENSIONS)
+                        .unwrap()
+                );
+
                 // Careful, we can still be in 1.4 version even if `upcast` succeeds
                 let raw_result = match egl1_5 {
+                    Some(egl) if self.wsi.kind == WindowKind::DrmFd => egl
+                        .get_current_surface(khronos_egl::DRAW)
+                        .ok_or(khronos_egl::Error::BadCurrentSurface),
                     Some(egl) if self.wsi.kind != WindowKind::Unknown => {
                         let attributes_usize = attributes
                             .into_iter()
