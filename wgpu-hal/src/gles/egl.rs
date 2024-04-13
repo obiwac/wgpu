@@ -1,3 +1,4 @@
+use drm::Device;
 use glow::HasContext;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
@@ -73,6 +74,28 @@ type EglDebugMessageControlFun = unsafe extern "system" fn(
     proc: EGLDEBUGPROCKHR,
     attrib_list: *const khronos_egl::Attrib,
 ) -> raw::c_int;
+
+type EGLDeviceEXT = *const raw::c_void;
+const EGL_NO_DEVICE_EXT: EGLDeviceEXT = 0 as *const raw::c_void;
+
+type EglQueryDevicesExtFun = unsafe extern "system" fn(
+    max_devices: u32,
+    devices: *mut EGLDeviceEXT,
+    num_devices: *mut u32,
+) -> raw::c_int;
+
+const EGL_DRM_DEVICE_FILE_EXT: khronos_egl::Enum = 0x3233;
+
+type EglQueryDeviceStringExtFun =
+    unsafe extern "system" fn(device: EGLDeviceEXT, name: khronos_egl::Enum) -> *const raw::c_char;
+
+const EGL_PLATFORM_DEVICE_EXT: khronos_egl::Enum = 0x313F;
+
+type EglGetPlatformDisplayExtFun = unsafe extern "system" fn(
+    platform: khronos_egl::Enum,
+    native_display: *mut raw::c_void,
+    attrib_list: *const khronos_egl::Attrib,
+) -> khronos_egl::EGLDisplay;
 
 unsafe extern "system" fn egl_debug_proc(
     error: khronos_egl::Enum,
@@ -619,6 +642,7 @@ enum WindowKind {
     Wayland,
     X11,
     AngleX11,
+    DrmFd,
     Unknown,
 }
 
@@ -661,6 +685,179 @@ impl Instance {
 
 unsafe impl Send for Instance {}
 unsafe impl Sync for Instance {}
+
+impl Instance {
+    pub unsafe fn create_surface_from_drm_fd(
+        &self,
+        fd: std::os::unix::io::RawFd,
+    ) -> Result<Surface, crate::InstanceError> {
+        let mut inner = self.inner.lock();
+        inner.egl.make_current();
+        let egl = &inner.egl.instance;
+
+        // check for EGL_EXT_device_enumeration
+
+        let client_extensions = egl.query_string(None, khronos_egl::EXTENSIONS);
+
+        let client_ext_str = match client_extensions {
+            Ok(ext) => ext.to_string_lossy().into_owned(),
+            Err(_) => String::new(),
+        };
+
+        if !client_ext_str.contains("EGL_EXT_device_enumeration") {
+            return Err(crate::InstanceError::new(format!(
+                "Your EGL implementation does not support EGL_EXT_device_enumeration. In the future, this will fall back on KHR_platform_gbm."
+            )));
+        }
+
+        // check for EGL_EXT_platform_base
+
+        if !client_ext_str.contains("EGL_EXT_platform_base") {
+            return Err(crate::InstanceError::new(format!(
+                "Your EGL implementation does not support EGL_EXT_platform_base."
+            )));
+        }
+
+        // get a list of EGLDeviceEXT's
+
+        let egl_query_devices_ext: EglQueryDevicesExtFun = {
+            let addr = egl.get_proc_address("eglQueryDevicesEXT").unwrap();
+            unsafe { std::mem::transmute(addr) }
+        };
+
+        let mut num_devices: u32 = 0;
+        if unsafe { egl_query_devices_ext(0, ptr::null_mut(), &mut num_devices) } == 0 {
+            return Err(crate::InstanceError::new(format!(
+                "Failed to query EGL devices"
+            )));
+        }
+
+        let mut egl_devices: Vec<EGLDeviceEXT> = vec![ptr::null(); num_devices as usize];
+        if unsafe { egl_query_devices_ext(num_devices, egl_devices.as_mut_ptr(), &mut num_devices) }
+            == 0
+        {
+            return Err(crate::InstanceError::new(format!(
+                "Failed to query EGL devices"
+            )));
+        }
+
+        // equivalent to drmGetDevice
+
+        struct DrmDevice {
+            fd: std::os::unix::io::RawFd,
+        }
+
+        impl std::os::unix::io::AsFd for DrmDevice {
+            fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+                unsafe { std::os::fd::BorrowedFd::borrow_raw(self.fd) }
+            }
+        }
+
+        impl Device for DrmDevice {}
+
+        impl DrmDevice {
+            fn new(fd: std::os::unix::io::RawFd) -> Self {
+                Self { fd }
+            }
+        }
+
+        let drm_device = DrmDevice::new(fd);
+        let driver = drm_device.get_driver().unwrap();
+
+        // traverse EGLDeviceEXT list to find the one that matches the DRM fd
+
+        let egl_query_device_string_ext: EglQueryDeviceStringExtFun = {
+            let addr = egl.get_proc_address("eglQueryDeviceStringEXT").unwrap();
+            unsafe { std::mem::transmute(addr) }
+        };
+
+        let mut chosen_egl_device = EGL_NO_DEVICE_EXT;
+
+        for egl_device in egl_devices.iter() {
+            let egl_raw_name =
+                unsafe { egl_query_device_string_ext(*egl_device, EGL_DRM_DEVICE_FILE_EXT) };
+
+            if egl_raw_name.is_null() {
+                continue;
+            }
+
+            let egl_name = unsafe { std::ffi::CStr::from_ptr(egl_raw_name) };
+            println!("TODO EGL device: {:?}, DRM device: {:?}", egl_name, driver);
+
+            // TODO for now, just arbitrarily choose the last device to preserve my sanity
+            // what we should be doing however is traversing the list of nodes in the DRM device
+            // in libdrm, that's just device->nodes[i] (a bit more complicated but that's the gist)
+            // I don't think this is set in drm-rs, so probably I'll have to add it there
+            // I didn't really understand how it's being set in xf86drm.c, so that's why I'm leaving it for later
+
+            chosen_egl_device = *egl_device;
+        }
+
+        if chosen_egl_device == EGL_NO_DEVICE_EXT {
+            return Err(crate::InstanceError::new(format!(
+                "Failed to find a matching EGL device (DRM device driver: {:?})",
+                driver
+            )));
+        }
+
+        // create EGL display
+
+        let egl_get_platform_display_ext: EglGetPlatformDisplayExtFun = {
+            let addr = egl.get_proc_address("eglGetPlatformDisplayEXT").unwrap();
+            unsafe { std::mem::transmute(addr) }
+        };
+
+        let display = unsafe {
+            egl_get_platform_display_ext(
+                EGL_PLATFORM_DEVICE_EXT,
+                chosen_egl_device as *mut raw::c_void,
+                ptr::null(),
+            )
+        };
+
+        if display == khronos_egl::NO_DISPLAY {
+            return Err(crate::InstanceError::new(format!(
+                "Failed to create EGL display"
+            )));
+        }
+
+        let khronos_egl_display = unsafe { khronos_egl::Display::from_ptr(display) };
+
+        // create new inner from that EGL display
+
+        let new_inner = Inner::create(
+            self.flags,
+            Arc::clone(&inner.egl.instance),
+            khronos_egl_display,
+            inner.force_gles_minor_version,
+        )?;
+
+        use std::ops::DerefMut;
+        let old_inner = std::mem::replace(inner.deref_mut(), new_inner);
+        drop(old_inner);
+
+        // finally, create that surface
+
+        inner.egl.unmake_current();
+
+        Ok(Surface {
+            egl: inner.egl.clone(),
+            wsi: WindowSystemInterface {
+                display_owner: self.wsi.display_owner.clone(),
+                kind: WindowKind::DrmFd,
+            },
+            config: inner.config,
+            // TODO what is the meaning of this???
+            presentable: true, // inner.supports_native_window,
+            raw_window_handle: raw_window_handle::DrmWindowHandle::new(
+                fd.try_into().expect("invalid fd"),
+            )
+            .into(),
+            swapchain: RwLock::new(None),
+            srgb_kind: inner.srgb_kind,
+        })
+    }
+}
 
 impl crate::Instance<super::Api> for Instance {
     unsafe fn init(desc: &crate::InstanceDescriptor) -> Result<Self, crate::InstanceError> {
@@ -1183,6 +1380,7 @@ impl crate::Surface<super::Api> for Surface {
                         };
                         window_ptr
                     }
+                    (WindowKind::DrmFd, Rwh::Drm(handle)) => handle.plane as *mut std::ffi::c_void,
                     _ => {
                         log::warn!(
                             "Initialized platform {:?} doesn't work with window {:?}",
@@ -1228,8 +1426,19 @@ impl crate::Surface<super::Api> for Surface {
                 #[cfg(Emscripten)]
                 let egl1_5: Option<&Arc<EglInstance>> = Some(&self.egl.instance);
 
+                println!(
+                    "exts: {:?}",
+                    self.egl
+                        .instance
+                        .query_string(None, khronos_egl::EXTENSIONS)
+                        .unwrap()
+                );
+
                 // Careful, we can still be in 1.4 version even if `upcast` succeeds
                 let raw_result = match egl1_5 {
+                    Some(egl) if self.wsi.kind == WindowKind::DrmFd => egl
+                        .get_current_surface(khronos_egl::DRAW)
+                        .ok_or(khronos_egl::Error::BadCurrentSurface),
                     Some(egl) if self.wsi.kind != WindowKind::Unknown => {
                         let attributes_usize = attributes
                             .into_iter()
