@@ -551,16 +551,14 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         */
         #[cfg(gles)]
         if hal_surface.is_none() {
-            hal_surface =
-                self.instance
-                    .gl
-                    .as_ref()
-                    .map(|inst| unsafe {
-							  match inst.create_surface_from_drm_fd(fd) {
-								  Ok(raw) => Ok(AnySurface::new(HalSurface::<hal::api::Gles> { raw: Arc::new(raw) })),
-								  Err(e) => Err(e),
-							  }
-						   })
+            hal_surface = self.instance.gl.as_ref().map(|inst| unsafe {
+                match inst.create_surface_from_drm_fd(fd) {
+                    Ok(raw) => Ok(AnySurface::new(HalSurface::<hal::api::Gles> {
+                        raw: Arc::new(raw),
+                    })),
+                    Err(e) => Err(e),
+                }
+            })
         }
 
         let hal_surface = hal_surface.unwrap()?;
